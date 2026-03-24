@@ -5,6 +5,7 @@
 
 # Output data
 output/
+output/har/
 
 # Python
 __pycache__/

@@ -39,7 +39,10 @@ class BusinessWireSpider(scrapy.Spider):
         industry_id = response.meta["industry_id"]
         sel = Selector(response)
 
+        depth = self.settings.getint("SCRAPE_DEPTH", 10)
         links = sel.css('a[href^="/news/home/"]')
+        if depth > 0:
+            links = links[:depth]
         self.logger.info(
             "[Industry %d] Found %d article links", industry_id, len(links)
         )

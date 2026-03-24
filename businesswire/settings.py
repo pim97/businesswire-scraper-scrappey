@@ -8,6 +8,9 @@ NEWSPIDER_MODULE = "businesswire.spiders"
 # Scrappey API key — set via environment variable
 SCRAPPEY_API_KEY = os.environ.get("SCRAPPEY_API_KEY", "")
 
+# Max articles to scrape per industry (0 = unlimited)
+SCRAPE_DEPTH = int(os.environ.get("SCRAPE_DEPTH", 10))
+
 # Crawl responsibly
 ROBOTSTXT_OBEY = False  # We go through Scrappey, not direct
 
@@ -31,6 +34,9 @@ DOWNLOADER_MIDDLEWARES = {
     # Enable Scrappey middleware
     "businesswire.middlewares.ScrappeyDownloaderMiddleware": 543,
 }
+
+# HAR debug mode — saves full request/response data to output/har/ for debugging
+HAR_DEBUG = os.environ.get("HAR_DEBUG", "false").lower() in ("true", "1", "yes")
 
 # Output
 FEEDS = {

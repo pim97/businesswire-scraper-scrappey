@@ -1,10 +1,15 @@
 import json
 import logging
+import os
+import time
+from datetime import datetime, timezone
 
 from scrapy import signals
 from scrapy.http import HtmlResponse, Request, Response, TextResponse
 
 logger = logging.getLogger(__name__)
+
+HAR_DIR = os.path.join("output", "har")
 
 
 class ScrappeyDownloaderMiddleware:
@@ -12,27 +17,40 @@ class ScrappeyDownloaderMiddleware:
 
     Requests must have meta={'api': 'scrappey'} to be routed through Scrappey.
     All other requests pass through unchanged.
+
+    When HAR_DEBUG=True in settings, saves a HAR file with the full raw
+    Scrappey response for every request to output/har/.
     """
 
-    def __init__(self, api_key):
+    def __init__(self, api_key, har_debug):
         self.api_key = api_key
         self.reuse_session = True
         self._session = None
+        self.har_debug = har_debug
+        self.har_entries = []
 
     @classmethod
     def from_crawler(cls, crawler):
         api_key = crawler.settings.get("SCRAPPEY_API_KEY", "")
+        har_debug = crawler.settings.getbool("HAR_DEBUG", False)
         if not api_key:
             logger.warning(
                 "SCRAPPEY_API_KEY not set — Scrappey middleware will fail. "
                 "Set the SCRAPPEY_API_KEY environment variable."
             )
-        middleware = cls(api_key)
+        middleware = cls(api_key, har_debug)
+        crawler.signals.connect(middleware.spider_opened, signal=signals.spider_opened)
         crawler.signals.connect(middleware.spider_closed, signal=signals.spider_closed)
         return middleware
 
+    def spider_opened(self, spider):
+        if self.har_debug:
+            os.makedirs(HAR_DIR, exist_ok=True)
+            logger.info("[HAR] Debug logging enabled — saving to %s/", HAR_DIR)
+
     def spider_closed(self, spider):
         self._session = None
+        self._save_har()
 
     # ------------------------------------------------------------------
     # Middleware hooks
@@ -45,6 +63,7 @@ class ScrappeyDownloaderMiddleware:
         if request.meta.get("api") != "scrappey":
             return None
 
+        request.meta["_har_start"] = time.time()
         body = self._build_scrappey_body(request)
         scrappey_url = f"https://publisher.scrappey.com/api/v1?key={self.api_key}"
 
@@ -70,35 +89,33 @@ class ScrappeyDownloaderMiddleware:
         if request.meta.get("api") != "scrappey":
             return response
 
+        original_url = request.meta.get("original_url", "unknown")
+
         if response.status == 400:
-            logger.error(
-                "[Scrappey] Proxy returned 400 for %s",
-                request.meta.get("original_url", "unknown"),
-            )
+            logger.error("[Scrappey] Proxy returned 400 for %s", original_url)
+            self._log_har_entry(request, response, {}, "proxy_400")
             return response
 
         try:
             data = json.loads(response.text)
         except json.JSONDecodeError as exc:
-            logger.warning(
-                "[Scrappey] Non-JSON response for %s: %s",
-                request.meta.get("original_url", "unknown"),
-                exc,
-            )
+            logger.warning("[Scrappey] Non-JSON response for %s: %s", original_url, exc)
+            self._log_har_entry(request, response, {}, f"json_error: {exc}")
             return response.replace(status=400)
 
         if data.get("error"):
             logger.warning("[Scrappey] API error: %s", data["error"])
+            self._log_har_entry(request, response, data, f"api_error: {data['error']}")
             return response.replace(status=400)
 
         solution = data.get("solution", {})
         status_code = solution.get("statusCode", 200)
+
+        # Log HAR entry BEFORE transforming — this is the raw Scrappey response
+        self._log_har_entry(request, response, data)
+
         if status_code >= 400:
-            logger.warning(
-                "[Scrappey] HTTP %d for %s",
-                status_code,
-                request.meta.get("original_url", "unknown"),
-            )
+            logger.warning("[Scrappey] HTTP %d for %s", status_code, original_url)
             return response.replace(status=status_code)
 
         # Reuse session across requests
@@ -107,6 +124,88 @@ class ScrappeyDownloaderMiddleware:
             self._session = session_id
 
         return self._build_response(request, solution, session_id)
+
+    # ------------------------------------------------------------------
+    # HAR debug logging
+    # ------------------------------------------------------------------
+
+    def _log_har_entry(self, request, response, scrappey_data, error=None):
+        """Capture a HAR entry from the raw Scrappey response."""
+        if not self.har_debug:
+            return
+
+        original_url = request.meta.get("original_url", request.url)
+        started = request.meta.get("_har_start", time.time())
+        elapsed_ms = round((time.time() - started) * 1000)
+
+        solution = scrappey_data.get("solution", {})
+        response_body = solution.get("response", "")
+        inner_text = solution.get("innerText", "")
+
+        entry = {
+            "startedDateTime": datetime.now(timezone.utc).isoformat(),
+            "time": elapsed_ms,
+            "request": {
+                "method": "GET",
+                "url": original_url,
+                "headers": [],
+                "queryString": [],
+                "bodySize": -1,
+                "_scrappey": {
+                    "session_sent": request.meta.get("scrappey_session", ""),
+                    "cmd": "request.get",
+                },
+            },
+            "response": {
+                "status": solution.get("statusCode", response.status),
+                "statusText": error or "",
+                "headers": [
+                    {"name": k, "value": v}
+                    for k, v in (solution.get("responseHeaders") or {}).items()
+                ],
+                "cookies": solution.get("cookies", []),
+                "content": {
+                    "size": len(response_body),
+                    "mimeType": (solution.get("responseHeaders") or {}).get(
+                        "content-type", "text/html"
+                    ),
+                    "text": response_body,
+                },
+                "_scrappey": {
+                    "currentUrl": solution.get("currentUrl", ""),
+                    "verified": solution.get("verified", False),
+                    "userAgent": solution.get("userAgent", ""),
+                    "innerText": inner_text,
+                    "innerTextLength": len(inner_text),
+                    "responseLength": len(response_body),
+                    "session": scrappey_data.get("session", ""),
+                    "timeElapsed": scrappey_data.get("timeElapsed", 0),
+                    "error": error or scrappey_data.get("error"),
+                },
+            },
+        }
+
+        self.har_entries.append(entry)
+
+    def _save_har(self):
+        """Write collected HAR entries to disk."""
+        if not self.har_debug or not self.har_entries:
+            return
+
+        har = {
+            "log": {
+                "version": "1.2",
+                "creator": {"name": "businesswire-scrapy-scrappey", "version": "1.0"},
+                "entries": self.har_entries,
+            }
+        }
+
+        filename = f"har_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.har"
+        filepath = os.path.join(HAR_DIR, filename)
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(har, f, indent=2, ensure_ascii=False, default=str)
+
+        logger.info("[HAR] Saved %d entries to %s", len(self.har_entries), filepath)
 
     # ------------------------------------------------------------------
     # Helpers

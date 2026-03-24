@@ -111,7 +111,15 @@ Scrappey handles Akamai bot detection behind the scenes using residential proxie
 
 ## Configuration
 
-Key settings in `businesswire/settings.py`:
+All configuration is done via environment variables in your `.env` file:
+
+| Variable           | Default | Description                                           |
+|--------------------|---------|-------------------------------------------------------|
+| `SCRAPPEY_API_KEY` | —       | Your Scrappey API key (required)                      |
+| `SCRAPE_DEPTH`     | `10`    | Max articles to scrape per industry (`0` = unlimited) |
+| `HAR_DEBUG`        | `false` | Save raw request/response data to `output/har/`       |
+
+Additional settings in `businesswire/settings.py`:
 
 | Setting                         | Default | Description                              |
 |---------------------------------|---------|------------------------------------------|
